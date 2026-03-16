@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { consola } from 'consola';
 import {
     createJob,
     getJob,
@@ -55,7 +56,7 @@ export async function POST(req: NextRequest) {
 
         // Start render asynchronously (don't await)
         startRenderAsync(job.id).catch((err) => {
-            console.error(`[${job.id}] Unhandled render error:`, err);
+            consola.error(`[${job.id}] Unhandled render error:`, err);
         });
 
         return NextResponse.json({ jobId: job.id, status: job.status }, { status: 201 });
@@ -112,7 +113,7 @@ async function startRenderAsync(jobId: string): Promise<void> {
         updateJob(jobId, { status: 'completed', outputUrl, progress: 100, phase: 'Done' });
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[${jobId}] Render failed:`, msg);
+        consola.error(`[${jobId}] Render failed:`, msg);
         updateJob(jobId, { status: 'failed', error: msg, phase: 'Failed' });
     } finally {
         decrementActive();

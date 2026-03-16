@@ -3,7 +3,7 @@
  * in development (single Node process). For production replace with MongoDB.
  */
 
-export type JobStatus = 'queued' | 'processing' | 'completed' | 'failed';
+export type JobStatus = 'queued' | 'processing' | 'paused' | 'completed' | 'failed' | 'cancelled';
 export type Format = '9:16' | '16:9' | '1:1';
 export type Speaker = 'left' | 'right';
 
@@ -15,12 +15,14 @@ export interface ScriptLine {
 export interface RenderJob {
     id: string;
     status: JobStatus;
-    progress: number;      // 0-100
-    phase: string;         // human-readable current phase
-    outputUrl: string | null;  // e.g. /outputs/job_123.mp4
+    progress: number;
+    phase: string;
+    outputUrl: string | null;
     error: string | null;
     createdAt: string;
     updatedAt: string;
+    cancelled: boolean;
+    paused: boolean;
 
     // Job params stored for metadata generation later
     script: ScriptLine[];
@@ -28,7 +30,7 @@ export interface RenderJob {
     leftCharId: string;
     rightCharId: string;
     format: Format;
-    duration: number;      // seconds
+    duration: number;
     voiceLeft: string;
     voiceRight: string;
     subAlign: string;
@@ -66,7 +68,7 @@ export function decrementActive(): void {
     global.__activeRenders = Math.max(0, (global.__activeRenders ?? 1) - 1);
 }
 
-export function createJob(params: Omit<RenderJob, 'id' | 'status' | 'progress' | 'phase' | 'outputUrl' | 'error' | 'createdAt' | 'updatedAt'>): RenderJob {
+export function createJob(params: Omit<RenderJob, 'id' | 'status' | 'progress' | 'phase' | 'outputUrl' | 'error' | 'createdAt' | 'updatedAt' | 'cancelled' | 'paused'>): RenderJob {
     const id = `job_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const job: RenderJob = {
         id,
@@ -75,6 +77,8 @@ export function createJob(params: Omit<RenderJob, 'id' | 'status' | 'progress' |
         phase: 'Queued',
         outputUrl: null,
         error: null,
+        cancelled: false,
+        paused: false,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         ...params,
@@ -91,4 +95,14 @@ export function updateJob(id: string, patch: Partial<RenderJob>): void {
 
 export function getJob(id: string): RenderJob | undefined {
     return jobStore.get(id);
+}
+
+/** Waits while job is paused, resolves false if cancelled, true if can proceed */
+export async function waitIfPaused(id: string): Promise<boolean> {
+    while (true) {
+        const job = jobStore.get(id);
+        if (!job || job.cancelled) return false;
+        if (!job.paused) return true;
+        await new Promise(r => setTimeout(r, 500));
+    }
 }

@@ -54,11 +54,15 @@ interface StudioState {
   parsedScript: ScriptLine[];
   canGenerate: boolean;
   isRunning: boolean;
+  isPaused: boolean;
   isDone: boolean;
   stepDone: Record<StepId, boolean>;
   startPoll: (jobId: string) => void;
   handleGenerate: () => Promise<void>;
   handleAIScript: () => Promise<void>;
+  handleCancel: () => Promise<void>;
+  handlePause: () => Promise<void>;
+  handleResume: () => Promise<void>;
 }
 
 const StudioContext = createContext<StudioState | null>(null);
@@ -77,26 +81,25 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   const [script, setScript] = useState(EXAMPLE);
   const [format, setFormat] = useState<Format>("9:16");
   const [duration, setDuration] = useState(60);
-  const [voiceL, setVoiceL] = useState("en-US-Wavenet-D");
-  const [voiceR, setVoiceR] = useState("en-US-Wavenet-F");
+  const [voiceL, setVoiceL] = useState("voice-ben");
+  const [voiceR, setVoiceR] = useState("voice-gojo");
   const [subAlign, setSubAlign] = useState("center");
   const [topic, setTopic] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [job, setJob] = useState<JobPoll>({ id: null, status: "idle", progress: 0, phase: "", outputUrl: null, error: null });
   const [showModal, setShowModal] = useState(false);
-  
+
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [previewLineIdx, setPreviewLineIdx] = useState(0);
-  const [previewWordIdx, setPreviewWordIdx] = useState(0); 
+  const [previewWordIdx, setPreviewWordIdx] = useState(0);
 
   const [subSize, setSubSize] = useState(56);
-  const [subPos, setSubPos] = useState(50); 
-  const [subColor, setSubColor] = useState("#2196f3");
+  const [subPos, setSubPos] = useState(50);
+  const [subColor, setSubColor] = useState("#44f321ff");
   const [subFont, setSubFont] = useState("Arial");
-
-  const [charSize, setCharSize] = useState(50); 
-  const [charPosV, setCharPosV] = useState(0); 
+  const [charSize, setCharSize] = useState(50);
+  const [charPosV, setCharPosV] = useState(0);
 
   const parsedScript: ScriptLine[] = script.trim().split("\n").filter(Boolean).map((l) => {
     const m = l.match(/^(left|right):\s*(.+)/i);
@@ -106,6 +109,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   }).filter(line => line.text.length > 0);
 
   const isRunning = job.status === "processing" || job.status === "queued";
+  const isPaused = job.status === "paused";
   const isDone = job.status === "completed";
 
   const stepDone: Record<StepId, boolean> = {
@@ -116,26 +120,57 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     generate: isDone,
   };
 
-  const canGenerate = !!bg && parsedScript.length > 0 && !isRunning;
+  const canGenerate = !!bg && parsedScript.length > 0 && !isRunning && !isPaused;
+
+  useEffect(() => {
+    if (leftChar?.voiceId) setVoiceL(leftChar.voiceId);
+  }, [leftChar?.voiceId]);
+
+  useEffect(() => {
+    if (rightChar?.voiceId) setVoiceR(rightChar.voiceId);
+  }, [rightChar?.voiceId]);
+
+  // Preview animation: ~400ms per word, 300ms gap between lines
+  const MS_PER_WORD = 400;
+  const LINE_GAP_MS = 300;
 
   useEffect(() => {
     if (parsedScript.length === 0) return;
-    const interval = setInterval(() => {
-      setPreviewLineIdx(p => (p + 1) % parsedScript.length);
-      setPreviewWordIdx(0);
-    }, 2800);
-    return () => clearInterval(interval);
-  }, [parsedScript.length]); // length is stable enough as dep
+    let lineIdx = 0;
+    let wordIdx = 0;
+    let cancelled = false;
 
-  useEffect(() => {
-    const activeLine = parsedScript[previewLineIdx % Math.max(1, parsedScript.length)];
-    if (!activeLine) return;
-    const wordCount = activeLine.text.split(' ').filter(Boolean).length;
-    const interval = setInterval(() => {
-      setPreviewWordIdx(p => (p + 1) % wordCount);
-    }, 320);
-    return () => clearInterval(interval);
-  }, [previewLineIdx, parsedScript.length]); // eslint-disable-line
+    setPreviewLineIdx(0);
+    setPreviewWordIdx(0);
+
+    function scheduleNext() {
+      if (cancelled) return;
+      const line = parsedScript[lineIdx];
+      const words = line.text.split(' ').filter(Boolean);
+      const isLastWord = wordIdx >= words.length - 1;
+
+      if (isLastWord) {
+        setTimeout(() => {
+          if (cancelled) return;
+          lineIdx = (lineIdx + 1) % parsedScript.length;
+          wordIdx = 0;
+          setPreviewLineIdx(lineIdx);
+          setPreviewWordIdx(0);
+          scheduleNext();
+        }, MS_PER_WORD + LINE_GAP_MS);
+      } else {
+        setTimeout(() => {
+          if (cancelled) return;
+          wordIdx += 1;
+          setPreviewWordIdx(wordIdx);
+          scheduleNext();
+        }, MS_PER_WORD);
+      }
+    }
+
+    scheduleNext();
+    return () => { cancelled = true; };
+  }, [parsedScript.length]); // eslint-disable-line
 
   const handleAIScript = async () => {
     if (!topic.trim()) return;
@@ -143,10 +178,10 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     try {
       const res = await fetch("/api/generate-script", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          topic, 
-          lineCount: Math.max(8, Math.round(duration / 3)), 
-          tone: "engaging", 
+        body: JSON.stringify({
+          topic,
+          lineCount: Math.max(8, Math.round(duration / 3)),
+          tone: "engaging",
           templateType: "conversation",
           leftCharName: leftChar?.name || "Person A",
           rightCharName: rightChar?.name || "Person B"
@@ -165,7 +200,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         const res = await fetch(`/api/jobs/${jobId}`);
         const d = await res.json();
         setJob({ id: jobId, status: d.status, progress: d.progress, phase: d.phase, outputUrl: d.outputUrl, error: d.error });
-        if (d.status === "completed" || d.status === "failed") {
+        if (d.status === "completed" || d.status === "failed" || d.status === "cancelled") {
           clearInterval(pollRef.current!);
           if (d.status === "completed") setShowModal(true);
         }
@@ -174,6 +209,33 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  const handleCancel = async () => {
+    if (!job.id) return;
+    await fetch(`/api/jobs/${job.id}`, { method: 'DELETE' });
+    if (pollRef.current) clearInterval(pollRef.current);
+    setJob(p => ({ ...p, status: 'cancelled', phase: 'Cancelled', progress: 0 }));
+  };
+
+  const handlePause = async () => {
+    if (!job.id) return;
+    await fetch(`/api/jobs/${job.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'pause' }),
+    });
+    setJob(p => ({ ...p, status: 'paused', phase: 'Paused' }));
+  };
+
+  const handleResume = async () => {
+    if (!job.id) return;
+    await fetch(`/api/jobs/${job.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'resume' }),
+    });
+    setJob({ id: null, status: "processing", progress: 2, phase: "Submitting...", outputUrl: null, error: null });
+  };
 
   const handleGenerate = async () => {
     setJob({ id: null, status: "processing", progress: 2, phase: "Submitting…", outputUrl: null, error: null });
@@ -199,7 +261,16 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <StudioContext.Provider value={{
-      step, setStep, bg, setBg, leftChar, setLeftChar, rightChar, setRightChar, script, setScript, format, setFormat, duration, setDuration, voiceL, setVoiceL, voiceR, setVoiceR, subAlign, setSubAlign, topic, setTopic, aiLoading, setAiLoading, aiError, setAiError, job, setJob, showModal, setShowModal, previewLineIdx, previewWordIdx, subSize, setSubSize, subPos, setSubPos, subColor, setSubColor, subFont, setSubFont, charSize, setCharSize, charPosV, setCharPosV, parsedScript, canGenerate, isRunning, isDone, stepDone, startPoll, handleGenerate, handleAIScript
+      step, setStep, bg, setBg, leftChar, setLeftChar, rightChar, setRightChar,
+      script, setScript, format, setFormat, duration, setDuration,
+      voiceL, setVoiceL, voiceR, setVoiceR, subAlign, setSubAlign,
+      topic, setTopic, aiLoading, setAiLoading, aiError, setAiError,
+      job, setJob, showModal, setShowModal,
+      previewLineIdx, previewWordIdx,
+      subSize, setSubSize, subPos, setSubPos, subColor, setSubColor, subFont, setSubFont,
+      charSize, setCharSize, charPosV, setCharPosV,
+      parsedScript, canGenerate, isRunning, isPaused, isDone, stepDone,
+      startPoll, handleGenerate, handleAIScript, handleCancel, handlePause, handleResume
     }}>
       {children}
     </StudioContext.Provider>

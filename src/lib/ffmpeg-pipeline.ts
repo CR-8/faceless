@@ -11,60 +11,25 @@ import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { ScriptLine, Format, updateJob } from './job-store';
+import { consola } from 'consola';
+import { ScriptLine, Format, updateJob, getJob, waitIfPaused } from './job-store';
 import { synthesizeSpeech } from './google-tts';
 
+import { BG_ASSETS, CHAR_ASSETS } from '@/data/data';
+
 /* ─── Real background video paths (relative to /public) ─────────────────── */
-export const BG_VIDEO_MAP: Record<string, string> = {
-    'mine-1': 'background/Minecraft/mine-1.mp4',
-    'mine-2': 'background/Minecraft/mine-2.mp4',
-    'mine-3': 'background/Minecraft/mine-3.mp4',
-    'mine-4': 'background/Minecraft/mine-4.mp4',
-    'mine-5': 'background/Minecraft/mine-5.mp4',
-    'mine-6': 'background/Minecraft/mine-6.mp4',
-    'mine-7': 'background/Minecraft/mine-7.mp4',
-    'mine-8': 'background/Minecraft/mine-8.mp4',
-    'mine-9': 'background/Minecraft/mine-9.mp4',
-    'ss-1': 'background/Subway Surfers/ss-vid-1.mp4',
-    'ss-2': 'background/Subway Surfers/ss-vid-2.mp4',
-    'ss-3': 'background/Subway Surfers/ss-vid-3.mp4',
-    'ss-4': 'background/Subway Surfers/ss-vid-4.mp4',
-    'ss-5': 'background/Subway Surfers/ss-vid-5.mp4',
-    'ss-6': 'background/Subway Surfers/ss-vid-6.mp4',
-    'ss-7': 'background/Subway Surfers/ss-vid-7.mp4',
-    'other-1': 'background/Other/other-1.mp4',
-    'other-2': 'background/Other/other-2.mp4',
-    'other-3': 'background/Other/other-3.mp4',
-    'other-4': 'background/Other/other-4.mp4',
-    'other-5': 'background/Other/other-5.mp4',
-};
+export const BG_VIDEO_MAP: Record<string, string> = Object.fromEntries(
+    BG_ASSETS.map(asset => [asset.id, asset.videoUrl.replace(/^\//, '')])
+);
 
 /* ─── Real character image paths (relative to /public) ───────────────────── */
-export const CHAR_IMAGE_MAP: Record<string, string> = {
-    'ben-shapiro': 'character/Ben Shapiro.webp',
-    'gojo': 'character/Gojo.webp',
-    'joe-biden': 'character/Joe Biden.webp',
-    'obama': 'character/Obama.webp',
-    'peter-griffin': 'character/Peter Griffin.webp',
-    'spongebob': 'character/Spongebob.webp',
-    'squidward': 'character/Squiward.webp',
-    'stewie-griffin': 'character/Stewie Griffin.webp',
-    'sukuna': 'character/Sukuna.webp',
-    'trump': 'character/Trump.webp',
-};
+export const CHAR_IMAGE_MAP: Record<string, string> = Object.fromEntries(
+    CHAR_ASSETS.map(asset => [asset.id, asset.imgUrl.replace(/^\//, '')])
+);
 
-export const CHAR_COLORS_MAP: Record<string, string> = {
-    'ben-shapiro': '#2196f3',
-    'gojo': '#9c27b0',
-    'joe-biden': '#1565c0',
-    'obama': '#ef6c00',
-    'peter-griffin': '#795548',
-    'spongebob': '#fdd835',
-    'squidward': '#00897b',
-    'stewie-griffin': '#e53935',
-    'sukuna': '#b71c1c',
-    'trump': '#ff6f00',
-};
+export const CHAR_COLORS_MAP: Record<string, string> = Object.fromEntries(
+    CHAR_ASSETS.map(asset => [asset.id, asset.accentColor])
+);
 
 /* ─── Format dimensions ──────────────────────────────────────────────────── */
 const FORMAT_DIMS: Record<Format, { w: number; h: number }> = {
@@ -84,7 +49,7 @@ function ffmpegPath(p: string): string {
 /* ─── Run a process, stream its output to the terminal ───────────────────── */
 function runProcess(cmd: string, args: string[], label: string): Promise<void> {
     return new Promise((resolve, reject) => {
-        console.log(`\n══ [${label}] ${cmd} ${args.slice(0, 6).join(' ')} …\n`);
+        consola.start(`[${label}] Running ${cmd} ${args.slice(0, 6).join(' ')}...`);
         const proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
         proc.stdout.on('data', (d: Buffer) => process.stdout.write(d));
         proc.stderr.on('data', (d: Buffer) => process.stderr.write(d));
@@ -149,15 +114,16 @@ export interface WordTiming {
 }
 
 /* ─── Reel ASS builder ────────────────────────────────────────────────────────
-   Micro-chunks of 3 words. Active word = accent color.
-   All other words = pure white. No scale, no dimming. ─────────────────── */
+   Words are chunked PER LINE (never crossing speaker boundaries).
+   Each chunk is 3-5 words, sized by character length (max 18 chars).
+   Active word = accent color, rest = white. ──────────────────────────── */
 function buildAss(wordsData: WordTiming[], config: AssConfig): string {
     const { w, h, fontSize, posV, color, fontFamily, subAlign } = config;
     const accentAss = hexToAssColor(color);
     const whiteAss = '&H00FFFFFF&';
     const reelFontSize = Math.max(fontSize, 60);
     const marginV = Math.round(h * (posV / 100));
-    const alignment = ASS_ALIGN[subAlign] ?? 2; // default center-bottom
+    const alignment = ASS_ALIGN[subAlign] ?? 2;
 
     const out = [`[Script Info]`,
         `ScriptType: v4.00+`,
@@ -173,28 +139,59 @@ function buildAss(wordsData: WordTiming[], config: AssConfig): string {
         `Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`,
     ].join('\r\n') + '\r\n';
 
-    // Micro-chunks of 3 words
-    const CHUNK = 3;
-    const chunks: WordTiming[][] = [];
-    for (let i = 0; i < wordsData.length; i += CHUNK) {
-        chunks.push(wordsData.slice(i, i + CHUNK));
+    // Group words back into their original lines by detecting speaker changes.
+    // We use the speaker field on WordTiming to detect line boundaries.
+    const lines: WordTiming[][] = [];
+    let currentLine: WordTiming[] = [];
+    let currentSpeaker = wordsData[0]?.speaker ?? '';
+
+    for (const wt of wordsData) {
+        if (wt.speaker !== currentSpeaker && currentLine.length > 0) {
+            lines.push(currentLine);
+            currentLine = [];
+            currentSpeaker = wt.speaker;
+        }
+        currentLine.push(wt);
     }
+    if (currentLine.length > 0) lines.push(currentLine);
+
+    // For each line, split into chunks of max 4 words OR 18 chars — whichever hits first.
+    // This keeps subtitles clean and never bleeds across speaker turns.
+    const MAX_WORDS = 4;
+    const MAX_CHARS = 18;
 
     let events = '';
-    chunks.forEach(chunk => {
-        if (!chunk.length) return;
-        chunk.forEach((activeWord, wIdx) => {
-            // Build styled text: accent for active word, white for rest
-            const styledLine = chunk.map((wt, idx) => {
-                if (idx === wIdx) {
-                    return `{\\1c${accentAss}}${wt.word}{\\1c${whiteAss}}`;
-                }
-                return `{\\1c${whiteAss}}${wt.word}`;
-            }).join(' ');
 
-            events += `Dialogue: 0,${toAssTime(activeWord.start)},${toAssTime(activeWord.end)},Reel,,0,0,0,,${styledLine}\n`;
-        });
-    });
+    for (const lineWords of lines) {
+        const chunks: WordTiming[][] = [];
+        let chunk: WordTiming[] = [];
+        let chunkChars = 0;
+
+        for (const wt of lineWords) {
+            const addLen = chunk.length === 0 ? wt.word.length : wt.word.length + 1;
+            if (chunk.length > 0 && (chunk.length >= MAX_WORDS || chunkChars + addLen > MAX_CHARS)) {
+                chunks.push(chunk);
+                chunk = [];
+                chunkChars = 0;
+            }
+            chunk.push(wt);
+            chunkChars += addLen;
+        }
+        if (chunk.length > 0) chunks.push(chunk);
+
+        // Emit one ASS dialogue event per word, showing the full chunk with active word highlighted.
+        // The event's time window is exactly that word's duration — no overlap with next line.
+        for (const ch of chunks) {
+            ch.forEach((activeWord, wIdx) => {
+                const styledLine = ch.map((wt, idx) =>
+                    idx === wIdx
+                        ? `{\\1c${accentAss}}${wt.word}{\\1c${whiteAss}}`
+                        : `{\\1c${whiteAss}}${wt.word}`
+                ).join(' ');
+                events += `Dialogue: 0,${toAssTime(activeWord.start)},${toAssTime(activeWord.end)},Reel,,0,0,0,,${styledLine}\n`;
+            });
+        }
+    }
 
     return out + events;
 }
@@ -235,30 +232,58 @@ export async function runRenderPipeline(params: RenderParams): Promise<string> {
     try {
         /* ═══ Phase 1: TTS ═══ */
         updateJob(jobId, { phase: 'Voice Generation (TTS)', progress: 5 });
-        console.log(`\n╔══ [${jobId}] Phase 1 — TTS (${script.length} lines)\n`);
+        consola.info(`[${jobId}] Phase 1 — TTS (${script.length} lines)`);
+
+        // Dynamically compute the TTS speaking rate to match the target video duration
+        let estimatedNaturalMs = 0;
+        for (const line of script) {
+            const words = line.text.split(/\s+/).filter(Boolean).length;
+            estimatedNaturalMs += (words / 2.5) * 1000; // ~150 words per minute naturally
+            estimatedNaturalMs += (line.text.match(/[\.\!\?]/g) || []).length * 500;
+            estimatedNaturalMs += (line.text.match(/[,]/g) || []).length * 200;
+            estimatedNaturalMs += 400; // implicit newline break
+        }
+        
+        const estimatedNaturalSecs = estimatedNaturalMs / 1000;
+        
+        // Ratio = Natural / Target.
+        // edge-tts reliably fails above +40% — cap there.
+        // If the script is too long for the target, we accept the natural pace
+        // rather than pushing rate to unsafe territory. The video will just be
+        // longer than requested, which is better than a crash.
+        let ratio = estimatedNaturalSecs / duration;
+        let ratePercent = Math.round((ratio - 1) * 100);
+        ratePercent = Math.max(-40, Math.min(40, ratePercent));
+        const rateStr = ratePercent >= 0 ? `+${ratePercent}%` : `${ratePercent}%`;
+
+        consola.info(`[${jobId}] Estimated script duration: ${estimatedNaturalSecs.toFixed(1)}s for ${duration}s target. Set TTS rate to: ${rateStr}`);
 
         const audioPaths: string[] = [];
         for (let i = 0; i < script.length; i++) {
+            // Check cancel/pause before each TTS line
+            if (!(await waitIfPaused(jobId))) throw new Error('Job cancelled');
             const line = script[i];
             const p = path.join(tmpDir, `line_${i}.mp3`);
+            
             await synthesizeSpeech(
-                { text: line.text, voiceName: line.speaker === 'left' ? voiceLeft : voiceRight },
+                { text: line.text, voiceName: line.speaker === 'left' ? voiceLeft : voiceRight, rate: rateStr },
                 p
             );
             audioPaths.push(p);
             updateJob(jobId, { progress: 5 + Math.round((i / script.length) * 18) });
-            console.log(`  [TTS] line ${i + 1}/${script.length} [${line.speaker}]: "${line.text.slice(0, 50)}"`);
+            consola.success(`[TTS] line ${i + 1}/${script.length} [${line.speaker}]: "${line.text.slice(0, 50)}"`);
         }
 
         /* ═══ Phase 2: Measure durations ═══ */
+        if (!(await waitIfPaused(jobId))) throw new Error('Job cancelled');
         updateJob(jobId, { phase: 'Measuring Durations', progress: 24 });
-        console.log(`\n╠══ [${jobId}] Phase 2 — ffprobe\n`);
+        consola.info(`[${jobId}] Phase 2 — Measuring via ffprobe`);
 
         const durations: number[] = [];
         for (const ap of audioPaths) {
             const d = await getAudioDuration(ap);
             durations.push(d);
-            console.log(`  ${path.basename(ap)} → ${d.toFixed(3)}s`);
+            consola.ready(`${path.basename(ap)} length: ${d.toFixed(3)}s`);
         }
 
         const timings: { start: number; end: number }[] = [];
@@ -268,22 +293,25 @@ export async function runRenderPipeline(params: RenderParams): Promise<string> {
             cursor += d;
         }
         const audioDuration = cursor;
-        const videoDuration = Math.max(audioDuration + 0.5, 5);
-        const clampedDuration = duration;
+        // Use actual audio duration (+ small tail) as the video length.
+        // The user's `duration` only influenced TTS rate — we never pad with silence.
+        const videoDuration = Math.max(audioDuration + 0.3, 5);
 
         /* ═══ Phase 3: Merge audio ═══ */
+        if (!(await waitIfPaused(jobId))) throw new Error('Job cancelled');
         updateJob(jobId, { phase: 'Merging Audio', progress: 33 });
-        console.log(`\n╠══ [${jobId}] Phase 3 — Audio merge\n`);
+        consola.info(`[${jobId}] Phase 3 — Audio Merge`);
 
         const concatList = path.join(tmpDir, 'concat.txt');
         await fs.writeFile(concatList, audioPaths.map(p => `file '${p.replace(/\\/g, '/').replace(/'/g, "'\\''")}'\n`).join(''), 'utf-8');
 
-        const mergedAudio = path.join(tmpDir, 'audio.mp3');
+        const mergedAudio = path.join(tmpDir, 'audio.wav');
         await runProcess('ffmpeg', [
             '-y', '-f', 'concat', '-safe', '0', '-i', concatList, '-c', 'copy', mergedAudio,
         ], `${jobId}/merge-audio`);
 
         /* ═══ Phase 4: ASS generation ═══ */
+        if (!(await waitIfPaused(jobId))) throw new Error('Job cancelled');
         updateJob(jobId, { phase: 'Generating Subtitles', progress: 42 });
         const assPath = path.join(tmpDir, 'subs.ass');
 
@@ -321,11 +349,12 @@ export async function runRenderPipeline(params: RenderParams): Promise<string> {
             subAlign: params.subAlign,
         });
         await fs.writeFile(assPath, assData, 'utf-8');
-        console.log(`\n╠══ [${jobId}] Phase 4 — ASS written: ${assPath}\n`);
+        consola.success(`[${jobId}] Phase 4 — ASS written: ${assPath}`);
 
         /* ═══ Phase 5: FFmpeg render ═══ */
+        if (!(await waitIfPaused(jobId))) throw new Error('Job cancelled');
         updateJob(jobId, { phase: 'FFmpeg Render', progress: 50 });
-        console.log(`\n╠══ [${jobId}] Phase 5 — FFmpeg render  (${w}x${h} ${format} ${clampedDuration.toFixed(1)}s)\n`);
+        consola.info(`[${jobId}] Phase 5 — FFmpeg Final Render (${w}x${h} ${format} ${videoDuration.toFixed(1)}s)`);
 
         // Resolve real paths
         const bgRelPath = BG_VIDEO_MAP[bgId];
@@ -401,12 +430,12 @@ export async function runRenderPipeline(params: RenderParams): Promise<string> {
         ffArgs.push('-map', '[vout]', '-map', '1:a');
         ffArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '23');
         ffArgs.push('-c:a', 'aac', '-b:a', '128k');
-        ffArgs.push('-t', String(clampedDuration));
+        ffArgs.push('-t', videoDuration.toFixed(3));
         ffArgs.push(outFile);
 
         await runProcess('ffmpeg', ffArgs, `${jobId}/render`);
 
-        console.log(`\n╚══ [${jobId}] ✓ Complete → /outputs/${jobId}.mp4\n`);
+        consola.box(`[${jobId}] ✓ Complete → /outputs/${jobId}.mp4`);
         updateJob(jobId, { progress: 98 });
         return `/outputs/${jobId}.mp4`;
 

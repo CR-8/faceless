@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useStudio } from "./StudioContext";
 import Image from "next/image";
@@ -22,7 +22,8 @@ export function StudioSidebarLeft() {
     format, setFormat, duration, setDuration, voiceL, setVoiceL, voiceR, setVoiceR, subAlign, setSubAlign,
     subSize, setSubSize, subPos, setSubPos, subFont, setSubFont, subColor, setSubColor,
     charSize, setCharSize, charPosV, setCharPosV,
-    isRunning, isDone, canGenerate, handleGenerate, setShowModal, job
+    isRunning, isPaused, isDone, canGenerate, handleGenerate, setShowModal, job,
+    handleCancel, handlePause, handleResume
   } = useStudio();
 
   return (
@@ -78,7 +79,7 @@ export function StudioSidebarLeft() {
                         <span className="text-[12px] text-[var(--text-primary)]">{sel.name}</span>
                       </>
                     ) : (
-                      <span className="text-[11px] text-[var(--text-muted)]">Select from right →</span>
+                      <span className="text-[11px] text-[var(--text-muted)]">Select from right </span>
                     )}
                     {sel && (
                       <button onClick={() => side === "left" ? setLeftChar(null) : setRightChar(null)} className="ml-auto bg-transparent border-none cursor-pointer text-[var(--text-muted)]">
@@ -109,7 +110,7 @@ export function StudioSidebarLeft() {
               className={`w-full h-8 gap-1.5 text-[12px] border-none ${topic.trim() && !aiLoading ? "bg-[var(--accent-lime)] text-[#0f0f11] hover:bg-[#b5e640]" : "bg-[var(--bg-raised)] text-[var(--text-disabled)]"}`}
             >
               {aiLoading ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
-              {aiLoading ? "Writing…" : "Generate with AI"}
+              {aiLoading ? "Writing" : "Generate with AI"}
             </Button>
             {aiError && <p className="font-mono text-[10px] text-red-500 m-0">{aiError}</p>}
             <Separator className="my-1 bg-[var(--border-subtle)]" />
@@ -118,7 +119,7 @@ export function StudioSidebarLeft() {
               onChange={e => setScript(e.target.value)}
               className="w-full min-h-[160px] px-2.5 py-2 bg-[var(--bg-base)] border border-[var(--border-subtle)] rounded-lg font-mono text-[11px] leading-[1.8] text-[var(--text-primary)] resize-y box-border outline-none focus:border-[var(--accent-lime)] transition-colors caret-[#c9ff47] placeholder:text-[var(--text-disabled)]"
             />
-            <p className="font-mono text-[9px] text-[var(--text-muted)] m-0">{parsedScript.length} lines · Left: / Right: prefix per line</p>
+            <p className="font-mono text-[9px] text-[var(--text-muted)] m-0">{parsedScript.length} lines  Left: / Right: prefix per line</p>
           </div>
         )}
 
@@ -264,7 +265,7 @@ export function StudioSidebarLeft() {
               </div>
             ))}
             <Separator className="my-1 bg-[var(--border-subtle)]" />
-            {!isRunning && !isDone && (
+            {!isRunning && !isPaused && !isDone && (
               <Button
                 disabled={!canGenerate}
                 onClick={handleGenerate}
@@ -273,14 +274,10 @@ export function StudioSidebarLeft() {
                 <Zap size={13} /> Generate Video
               </Button>
             )}
-            {isRunning && (
-              <div className="text-center py-2">
-                <div className="font-display font-extrabold text-[28px] text-[var(--accent-lime)]">{job.progress}%</div>
-                <div className="font-mono text-[10px] text-[var(--accent-blue)] mt-1">{job.phase}</div>
-                <div className="h-1 bg-[var(--bg-raised)] rounded-full overflow-hidden mt-2.5">
-                  <div className="h-full bg-[var(--accent-lime)] rounded-full transition-[width] duration-400 ease-in-out" style={{ width: `${job.progress}%` }} />
-                </div>
-              </div>
+            {(isRunning || isPaused) && (
+              <Button onClick={() => setShowModal(true)} className="w-full gap-1.5 h-9 text-[12px] font-semibold bg-[var(--accent-lime)] text-[#0f0f11] hover:bg-[#b5e640] border-none">
+                <Loader2 size={13} className={isRunning ? "animate-spin" : ""} /> View Progress
+              </Button>
             )}
             {isDone && (
               <Button

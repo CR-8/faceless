@@ -5,7 +5,7 @@
  */
 
 import fs from 'fs/promises';
-import * as googleTTS from 'google-tts-api';
+import { consola } from 'consola';
 
 export interface TTSOptions {
     text: string;
@@ -13,34 +13,53 @@ export interface TTSOptions {
     languageCode?: string;
     speakingRate?: number;
     pitch?: number;
+    rate?: string; // Optional speed override, e.g., '+15%'
 }
 
 /**
- * Synthesize speech and write MP3 to the given output path.
- * google-tts-api only accepts short locale codes accepted by Google Translate.
+ * Synthesize speech using the local edge-tts FastAPI server.
+ * The server returns an MP3 audio stream which we save to outputPath.
  */
 export async function synthesizeSpeech(options: TTSOptions, outputPath: string): Promise<void> {
-    // google-tts-api uses Google Translate lang codes: 'en', 'en-gb', 'en-au'
-    // 'en-US' causes "lang might not exist" — use 'en' as the safe default
-    let lang = 'en';
-    if (options.voiceName.includes('GB')) lang = 'en-gb';
-    else if (options.voiceName.includes('AU')) lang = 'en-au';
-
     try {
-        const results = await googleTTS.getAllAudioBase64(options.text, {
-            lang,
-            slow: false,
-            host: 'https://translate.google.com',
-            splitPunct: ',.?!',
+        const params = new URLSearchParams({
+            text: options.text,
+            voice: options.voiceName || 'en-US-GuyNeural',
         });
-
-        const buffers = results.map(r => Buffer.from(r.base64, 'base64'));
-        const finalBuffer = Buffer.concat(buffers);
-        await fs.writeFile(outputPath, finalBuffer);
+        if (options.rate) {
+            params.append('rate', options.rate);
+        }
+        const url = `http://localhost:8000/tts?${params.toString()}`;
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            let errorDetail = `HTTP ${response.status}`;
+            try {
+                const errorData = await response.json();
+                errorDetail = errorData.detail || errorDetail;
+            } catch {
+                // Response wasn't JSON, use status
+            }
+            throw new Error(`TTS API Error: ${errorDetail}`);
+        }
+        
+        // Response is an MP3 audio stream
+        const arrayBuffer = await response.arrayBuffer();
+        
+        if (arrayBuffer.byteLength === 0) {
+            throw new Error('TTS API returned empty audio');
+        }
+        
+        // Write the audio buffer to the output path
+        await fs.writeFile(outputPath, Buffer.from(arrayBuffer));
+        
+        consola.success(`Generated TTS for text: "${options.text.substring(0, 30)}..." -> ${outputPath}`);
     } catch (err: unknown) {
+        consola.error(`TTS failed: ${err instanceof Error ? err.message : String(err)}`);
         throw new Error(`TTS failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 }
+
 
 export const VOICE_OPTIONS = [
     { id: 'en-US-Wavenet-D', name: 'David (US ♂)' },
