@@ -269,7 +269,7 @@ export async function runRenderPipeline(params: RenderParams): Promise<string> {
         }
         const audioDuration = cursor;
         const videoDuration = Math.max(audioDuration + 0.5, 5);
-        const clampedDuration = Math.min(duration, videoDuration);
+        const clampedDuration = duration;
 
         /* ═══ Phase 3: Merge audio ═══ */
         updateJob(jobId, { phase: 'Merging Audio', progress: 33 });
@@ -371,26 +371,27 @@ export async function runRenderPipeline(params: RenderParams): Promise<string> {
         filterParts.push(`[0:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}[bg]`);
         prevLabel = 'bg';
 
-        // Scale each char image once
-        if (leftPath && leftIdx >= 0) filterParts.push(`[${leftIdx}:v]scale=-1:${charH},setsar=1[cl]`);
-        if (rightPath && rightIdx >= 0) filterParts.push(`[${rightIdx}:v]scale=-1:${charH},setsar=1[cr]`);
+        // Evaluate timing expressions for each character
+        const leftExprs = script.map((line, i) => line.speaker === 'left' ? `between(t,${timings[i].start.toFixed(3)},${timings[i].end.toFixed(3)})` : null).filter(Boolean);
+        const rightExprs = script.map((line, i) => line.speaker === 'right' ? `between(t,${timings[i].start.toFixed(3)},${timings[i].end.toFixed(3)})` : null).filter(Boolean);
 
-        // Overlay characters per line with timing (Centered, One at a time)
-        script.forEach((line, i) => {
-            const { start, end } = timings[i];
-            const enable = `between(t,${start.toFixed(3)},${end.toFixed(3)})`;
-            const isLeft = line.speaker === 'left';
-            const hasImg = isLeft ? leftIdx >= 0 : rightIdx >= 0;
-            const imgLabel = isLeft ? 'cl' : 'cr';
-            const outLabel = `ov${i}`;
+        // Compute enable expressions using + (logical OR)
+        const leftEnable = leftExprs.length > 0 ? leftExprs.join('+') : '0';
+        const rightEnable = rightExprs.length > 0 ? rightExprs.join('+') : '0';
 
-            if (hasImg) {
-                filterParts.push(`[${prevLabel}][${imgLabel}]overlay=x=${overlayX}:y=${overlayY}:enable='${enable}'[${outLabel}]`);
-            } else {
-                filterParts.push(`[${prevLabel}]null[${outLabel}]`);
-            }
-            prevLabel = outLabel;
-        });
+        // Apply Left character if present 
+        if (leftPath && leftIdx >= 0 && leftExprs.length > 0) {
+            filterParts.push(`[${leftIdx}:v]scale=-1:${charH},setsar=1[cl]`);
+            filterParts.push(`[${prevLabel}][cl]overlay=x=${overlayX}:y=${overlayY}:enable='${leftEnable}'[ovL]`);
+            prevLabel = 'ovL';
+        }
+
+        // Apply Right character if present
+        if (rightPath && rightIdx >= 0 && rightExprs.length > 0) {
+            filterParts.push(`[${rightIdx}:v]scale=-1:${charH},setsar=1[cr]`);
+            filterParts.push(`[${prevLabel}][cr]overlay=x=${overlayX}:y=${overlayY}:enable='${rightEnable}'[ovR]`);
+            prevLabel = 'ovR';
+        }
 
         // Burn subtitles using ASS filter (native formatting)
         const escapedAss = ffmpegPath(assPath);
@@ -401,7 +402,6 @@ export async function runRenderPipeline(params: RenderParams): Promise<string> {
         ffArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '23');
         ffArgs.push('-c:a', 'aac', '-b:a', '128k');
         ffArgs.push('-t', String(clampedDuration));
-        ffArgs.push('-shortest');
         ffArgs.push(outFile);
 
         await runProcess('ffmpeg', ffArgs, `${jobId}/render`);

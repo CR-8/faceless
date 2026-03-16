@@ -1,98 +1,172 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
 
-const SYSTEM_PROMPT = `You are a script writer for short-form AI-generated faceless educational videos.
+const SYSTEM_PROMPT = `You are a script writer for short-form AI-generated faceless videos.
 
-Your job is to write a two-person conversational dialogue that explains a technical topic in a simple, engaging way.
-
-LEFT is the confident expert — explains clearly, uses analogies, never over-complicated.
-RIGHT is the curious learner — asks the exact questions the audience is thinking.
+Your job is to write a two-person conversational dialogue that explains a topic in an engaging way.
 
 Output rules:
 - Output ONLY raw script lines in this exact format:
   Left: [text]
   Right: [text]
-- Always start with Left delivering a hook — a question, a surprising fact, or a bold statement
-- Alternate between Left and Right naturally — not always one line each, sometimes two in a row is fine
-- Each line must be MAX 12 words. Short. Punchy. No filler.
-- Total lines must exactly match the requested count (default: 20 lines)
-- NO markdown, NO numbering, NO intro text, NO commentary — raw script only
-- Explain the topic entirely through the conversation — never break character
-- Use real world analogies wherever possible — make abstract concepts tangible
-- End with Left teasing the next video topic to drive follow
-- Never use phrases like "great question", "exactly right", "certainly" — keep it natural`;
+- Characters must act naturally according to their given personas.
+- Each line must be MAX 15 words. Short. Punchy. No filler.
+- Total lines must exactly match the requested count.
+- NO markdown, NO numbering, NO intro text, NO commentary — raw script only.
+- Explain the topic entirely through the conversation — never break character.
+- End with a teaser to drive followers.
+- Never use generic phrases like "great question", "exactly right", "certainly" — keep it natural.`;
+
+/** Maps a tone label to a Gemini temperature value */
+function toneToTemperature(tone: string): number {
+  const map: Record<string, number> = {
+    engaging: 0.8,
+    funny: 1.0,
+    serious: 0.4,
+    educational: 0.5,
+    dramatic: 0.9,
+  };
+  return map[tone.toLowerCase()] ?? 0.8;
+}
 
 export async function POST(req: NextRequest) {
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey || apiKey === "your_key_here") {
+      return NextResponse.json(
+        { error: "GEMINI_API_KEY is not configured in .env" },
+        { status: 500 }
+      );
+    }
+
+    // ── Parse & validate body ────────────────────────────────────────────────
+    let body: unknown;
     try {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey || apiKey === "your_key_here") {
-            return NextResponse.json(
-                { error: "GEMINI_API_KEY is not configured in .env" },
-                { status: 500 }
-            );
-        }
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+    }
 
-        const body = await req.json();
-        const { topic, lineCount = 8, tone = "engaging", templateType = "conversation" } = body;
+    const {
+      topic,
+      lineCount = 8,
+      tone = "engaging",
+      templateType = "conversation",
+      leftCharName = "Person A",
+      rightCharName = "Person B",
+    } = body as Record<string, unknown>;
 
-        if (!topic || typeof topic !== "string" || topic.trim().length === 0) {
-            return NextResponse.json({ error: "topic is required" }, { status: 400 });
-        }
+    if (!topic || typeof topic !== "string" || topic.trim().length === 0) {
+      return NextResponse.json({ error: "topic is required." }, { status: 400 });
+    }
+    if (topic.trim().length > 900) {
+      return NextResponse.json({ error: "topic too long (max 300 chars)." }, { status: 400 });
+    }
 
-        if (topic.trim().length > 300) {
-            return NextResponse.json({ error: "topic too long (max 300 chars)" }, { status: 400 });
-        }
+    const parsedLineCount = Number(lineCount);
+    if (!Number.isInteger(parsedLineCount) || parsedLineCount < 2 || parsedLineCount > 40) {
+      return NextResponse.json(
+        { error: "lineCount must be an integer between 2 and 40." },
+        { status: 400 }
+      );
+    }
 
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    // ── Build Gemini client ──────────────────────────────────────────────────
+    const genAI = new GoogleGenerativeAI(apiKey);
 
-        const userPrompt = `Topic: "${topic.trim()}"
+    const model = genAI.getGenerativeModel({
+      model: "gemini-2.5-flash",
+      // Proper way to supply a system instruction in the Gemini SDK
+      systemInstruction: SYSTEM_PROMPT,
+      generationConfig: {
+        temperature: toneToTemperature(String(tone)),
+        maxOutputTokens: 1024,
+        // candidateCount defaults to 1 — explicit for clarity
+        candidateCount: 1,
+      },
+      // Relax safety thresholds just enough for creative content
+      safetySettings: [
+        {
+          category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+          threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        },
+        {
+          category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+          threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        },
+      ],
+    });
+
+    // ── Build user prompt ────────────────────────────────────────────────────
+    const userPrompt = `Topic: "${topic.trim()}"
 Template type: ${templateType}
 Desired tone: ${tone}
-Number of dialogue lines: ${lineCount}
+Number of dialogue lines: ${parsedLineCount}
+Left Character Persona: ${leftCharName}
+Right Character Persona: ${rightCharName}
+
+IMPORTANT: Embody the specific personas of ${leftCharName} and ${rightCharName}. Use their defining quirks, mannerisms, and catchphrases in the dialogue. Keep it entertaining and true to character! Note: Continue prefixing the lines with "Left:" and "Right:".
 
 Generate the script now.`;
 
-        const result = await model.generateContent([
-            { text: SYSTEM_PROMPT },
-            { text: userPrompt },
-        ]);
-        const raw = result.response.text().trim();
+    // ── Call Gemini ──────────────────────────────────────────────────────────
+    const result = await model.generateContent(userPrompt);
+    const raw = result.response.text().trim();
 
-        // Validate that output has expected format lines
-        const lines = raw
-            .split("\n")
-            .map((l) => l.trim())
-            .filter((l) => l.length > 0);
-
-        const validLines = lines.filter((l) =>
-            /^(Left|Right|Narrator):\s+.+/i.test(l)
-        );
-
-        if (validLines.length === 0) {
-            return NextResponse.json(
-                { error: "AI returned an unexpected format. Please try again." },
-                { status: 500 }
-            );
-        }
-
-        return NextResponse.json({
-            script: validLines.join("\n"),
-            lineCount: validLines.length,
-            model: "gemini-2.5-flash",
-        });
-    } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : "Unknown error";
-
-        // Surface Gemini-specific errors more cleanly
-        if (message.includes("API_KEY_INVALID")) {
-            return NextResponse.json({ error: "Invalid Gemini API key." }, { status: 401 });
-        }
-        if (message.includes("SAFETY")) {
-            return NextResponse.json({ error: "Topic was blocked by safety filters. Please rephrase." }, { status: 422 });
-        }
-
-        console.error("[generate-script]", err);
-        return NextResponse.json({ error: message }, { status: 500 });
+    if (!raw) {
+      return NextResponse.json(
+        { error: "AI returned an empty response. Please try again." },
+        { status: 500 }
+      );
     }
+
+    // ── Parse & validate output ──────────────────────────────────────────────
+    const validLines = raw
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /^(Left|Right|Narrator):\s*.+/i.test(l));
+
+    if (validLines.length === 0) {
+      return NextResponse.json(
+        { error: "AI returned an unexpected format. Please try again." },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json({
+      script: validLines.join("\n"),
+      lineCount: validLines.length,
+      requestedLineCount: parsedLineCount,
+      model: "gemini-2.5-flash",
+      tone,
+      topic: topic.trim(),
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+
+    if (message.includes("API_KEY_INVALID") || message.includes("API key not valid")) {
+      return NextResponse.json({ error: "Invalid Gemini API key." }, { status: 401 });
+    }
+    if (message.includes("SAFETY") || message.includes("recitation")) {
+      return NextResponse.json(
+        { error: "Topic was blocked by safety filters. Please rephrase." },
+        { status: 422 }
+      );
+    }
+    if (message.includes("quota") || message.includes("RESOURCE_EXHAUSTED")) {
+      return NextResponse.json(
+        { error: "Gemini API quota exceeded. Please try again later." },
+        { status: 429 }
+      );
+    }
+    if (message.includes("DEADLINE_EXCEEDED") || message.includes("timeout")) {
+      return NextResponse.json(
+        { error: "Request timed out. Please try again." },
+        { status: 504 }
+      );
+    }
+
+    console.error("[generate-script]", err);
+    return NextResponse.json({ error: "Internal server error." }, { status: 500 });
+  }
 }

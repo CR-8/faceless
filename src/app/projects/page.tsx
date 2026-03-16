@@ -16,12 +16,12 @@ const columns = [
     { id: "done", name: "Done", color: "#10B981" }, // Emerald 
 ];
 
-interface ProjectFeature {
+type ProjectFeature = {
     id: string;
     name: string;
     column: string;
     createdAt: string;
-}
+};
 
 export default function ProjectsKanban() {
     const [features, setFeatures] = useState<ProjectFeature[]>([]);
