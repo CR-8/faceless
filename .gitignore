@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Large media assets — hosted on Cloudinary, not committed to repo
+/public/background
+/public/outputs
