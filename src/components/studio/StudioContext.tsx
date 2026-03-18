@@ -1,10 +1,12 @@
 "use client";
 
 import React, { createContext, useContext, useState, useRef, useEffect, useCallback } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { 
   StepId, Format, Speaker, ScriptLine, BgAsset, CharAsset, JobPoll, Metadata,
   BG_ASSETS, CHAR_ASSETS, VOICES, EXAMPLE 
 } from "./constants";
+import type { StudioStatePayload } from "@/types/db";
 
 interface StudioState {
   step: StepId;
@@ -63,6 +65,12 @@ interface StudioState {
   handleCancel: () => Promise<void>;
   handlePause: () => Promise<void>;
   handleResume: () => Promise<void>;
+  projectId: string | null;
+  projectTitle: string;
+  setProjectTitle: (t: string) => void;
+  saveProject: () => Promise<void>;
+  isSaving: boolean;
+  saveError: string | null;
 }
 
 const StudioContext = createContext<StudioState | null>(null);
@@ -74,6 +82,9 @@ export function useStudio() {
 }
 
 export function StudioProvider({ children }: { children: React.ReactNode }) {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+
   const [step, setStep] = useState<StepId>("background");
   const [bg, setBg] = useState<BgAsset | null>(BG_ASSETS[0]);
   const [leftChar, setLeftChar] = useState<CharAsset | null>(null);
@@ -90,16 +101,66 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   const [job, setJob] = useState<JobPoll>({ id: null, status: "idle", progress: 0, phase: "", outputUrl: null, error: null });
   const [showModal, setShowModal] = useState(false);
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [previewLineIdx, setPreviewLineIdx] = useState(0);
-  const [previewWordIdx, setPreviewWordIdx] = useState(0);
-
   const [subSize, setSubSize] = useState(56);
   const [subPos, setSubPos] = useState(50);
   const [subColor, setSubColor] = useState("#44f321ff");
   const [subFont, setSubFont] = useState("Arial");
   const [charSize, setCharSize] = useState(50);
   const [charPosV, setCharPosV] = useState(0);
+
+  // Project persistence state
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [projectTitle, setProjectTitle] = useState("Untitled Project");
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [previewLineIdx, setPreviewLineIdx] = useState(0);
+  const [previewWordIdx, setPreviewWordIdx] = useState(0);
+
+  // On mount: hydrate from ?projectId= query param
+  useEffect(() => {
+    const idFromUrl = searchParams.get("projectId");
+    if (!idFromUrl) return;
+    setProjectId(idFromUrl);
+
+    (async () => {
+      try {
+        const res = await fetch(`/api/projects/${idFromUrl}`);
+        if (!res.ok) throw new Error(`Failed to load project (${res.status})`);
+        const project = await res.json();
+        setProjectTitle(project.title ?? "Untitled Project");
+        const s: StudioStatePayload | null = project.studio_state;
+        if (s) {
+          const foundBg = BG_ASSETS.find(a => a.id === s.bgId) ?? BG_ASSETS[0];
+          setBg(foundBg);
+          const foundLeft = CHAR_ASSETS.find(a => a.id === s.leftCharId) ?? null;
+          const foundRight = CHAR_ASSETS.find(a => a.id === s.rightCharId) ?? null;
+          setLeftChar(foundLeft);
+          setRightChar(foundRight);
+          setScript(s.script);
+          setFormat(s.format);
+          setDuration(s.duration);
+          setVoiceL(s.voiceL);
+          setVoiceR(s.voiceR);
+          setSubAlign(s.subAlign);
+          setSubSize(s.subSize);
+          setSubPos(s.subPos);
+          setSubColor(s.subColor);
+          setSubFont(s.subFont);
+          setCharSize(s.charSize);
+          setCharPosV(s.charPosV);
+        }
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Failed to load project";
+        console.error("[StudioContext] hydration error:", msg);
+        setSaveError(msg);
+        // Reset to defaults
+        setProjectId(null);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const parsedScript: ScriptLine[] = script.trim().split("\n").filter(Boolean).map((l) => {
     const m = l.match(/^(left|right):\s*(.+)/i);
@@ -171,6 +232,66 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     scheduleNext();
     return () => { cancelled = true; };
   }, [parsedScript.length]); // eslint-disable-line
+
+  const saveProject = useCallback(async () => {
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      const payload: StudioStatePayload = {
+        bgId: bg?.id ?? BG_ASSETS[0].id,
+        leftCharId: leftChar?.id ?? "",
+        rightCharId: rightChar?.id ?? "",
+        script,
+        format,
+        duration,
+        voiceL,
+        voiceR,
+        subAlign,
+        subSize,
+        subPos,
+        subColor,
+        subFont,
+        charSize,
+        charPosV,
+      };
+
+      let savedId = projectId;
+      if (savedId) {
+        const res = await fetch(`/api/projects/${savedId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: projectTitle, studio_state: payload }),
+        });
+        if (!res.ok) {
+          const d = await res.json();
+          throw new Error(d.error ?? "Save failed");
+        }
+      } else {
+        const res = await fetch("/api/projects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: projectTitle, studio_state: payload }),
+        });
+        if (!res.ok) {
+          const d = await res.json();
+          throw new Error(d.error ?? "Save failed");
+        }
+        const created = await res.json();
+        savedId = created.id as string;
+        setProjectId(savedId);
+        // Update URL with projectId after first save
+        const params = new URLSearchParams(searchParams.toString());
+        params.set("projectId", savedId!);
+        router.replace(`/studio?${params.toString()}`);
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Save failed";
+      console.error("[StudioContext] save error:", msg);
+      setSaveError(msg);
+    } finally {
+      setIsSaving(false);
+    }
+  }, [projectId, projectTitle, bg, leftChar, rightChar, script, format, duration, voiceL, voiceR, subAlign, subSize, subPos, subColor, subFont, charSize, charPosV, searchParams, router]);
 
   const handleAIScript = async () => {
     if (!topic.trim()) return;
@@ -270,7 +391,8 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       subSize, setSubSize, subPos, setSubPos, subColor, setSubColor, subFont, setSubFont,
       charSize, setCharSize, charPosV, setCharPosV,
       parsedScript, canGenerate, isRunning, isPaused, isDone, stepDone,
-      startPoll, handleGenerate, handleAIScript, handleCancel, handlePause, handleResume
+      startPoll, handleGenerate, handleAIScript, handleCancel, handlePause, handleResume,
+      projectId, projectTitle, setProjectTitle, saveProject, isSaving, saveError,
     }}>
       {children}
     </StudioContext.Provider>

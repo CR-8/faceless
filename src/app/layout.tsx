@@ -36,6 +36,7 @@ export const metadata: Metadata = {
 };
 
 import { Providers } from "./providers";
+import { ConditionalShell } from "@/components/layout/ConditionalShell";
 
 export default function RootLayout({
   children,
@@ -49,7 +50,9 @@ export default function RootLayout({
         style={{ fontFamily: "var(--font-sans)" }}
       >
         <Providers>
-          {children}
+          <ConditionalShell>
+            {children}
+          </ConditionalShell>
         </Providers>
       </body>
     </html>
