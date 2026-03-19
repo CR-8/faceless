@@ -33,7 +33,12 @@ export function LoginForm() {
         router.push(next);
         router.refresh();
       } else {
-        const { error } = await supabase.auth.signUp({ email, password });
+        const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? window.location.origin;
+        const { error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: { emailRedirectTo: `${appUrl}${next}` },
+        });
         if (error) throw error;
         setMagicSent(true);
       }
@@ -48,10 +53,11 @@ export function LoginForm() {
     if (!email) { setError('Enter your email first'); return; }
     setError('');
     setLoading(true);
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? window.location.origin;
     try {
       const { error } = await supabase.auth.signInWithOtp({
         email,
-        options: { emailRedirectTo: `${window.location.origin}${next}` },
+        options: { emailRedirectTo: `${appUrl}${next}` },
       });
       if (error) throw error;
       setMagicSent(true);
